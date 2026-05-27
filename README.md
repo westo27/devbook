@@ -10,7 +10,7 @@ it, then generate a tidy summary for the period without trawling your memory.
 ## Install
 
 Download the latest `DevBook-<version>.dmg` from the
-[Releases page](https://github.com/CHANGE_ME/devbook/releases), open it, and drag
+[Releases page](https://github.com/westo27/devbook/releases), open it, and drag
 **DevBook** to Applications.
 
 > The app is not code-signed. On first launch macOS Gatekeeper will block it:
@@ -75,7 +75,7 @@ npm run dist       # signed-or-unsigned DMG + zip in dist/
 ### Publishing a release
 
 The `build.publish`, `repository`, and `homepage` fields in `package.json`
-currently contain `CHANGE_ME`. Set them to your GitHub owner/repo, then:
+currently contain `westo27`. Set them to your GitHub owner/repo, then:
 
 ```sh
 export GH_TOKEN=<a github token with repo scope>
