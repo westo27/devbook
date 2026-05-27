@@ -72,21 +72,6 @@ npm run pack       # unpacked .app in dist/ (fast, for testing)
 npm run dist       # signed-or-unsigned DMG + zip in dist/
 ```
 
-### Publishing a release
-
-The `build.publish`, `repository`, and `homepage` fields in `package.json`
-currently contain `westo27`. Set them to your GitHub owner/repo, then:
-
-```sh
-export GH_TOKEN=<a github token with repo scope>
-npm run release
-```
-
-This builds the DMG and uploads it to the GitHub Releases page.
-
-> An app icon is not yet bundled; the default Electron icon is used. Add
-> `build/icon.icns` (1024×1024 source) and electron-builder will pick it up.
-
 ## Optional shell helpers
 
 Two fish functions give terminal capture without opening the widget; they write
