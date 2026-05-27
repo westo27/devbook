@@ -1,0 +1,49 @@
+{
+  "name": "devbook",
+  "version": "1.0.0",
+  "description": "DevBook — always-on-top daily work-notes capture with sprint summaries",
+  "author": "Tom Weston <tom@voly.com>",
+  "license": "UNLICENSED",
+  "private": true,
+  "main": "main.js",
+  "homepage": "https://github.com/CHANGE_ME/devbook",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/CHANGE_ME/devbook.git"
+  },
+  "scripts": {
+    "start": "electron .",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder --mac",
+    "release": "electron-builder --mac --publish always"
+  },
+  "build": {
+    "appId": "com.voly.devbook",
+    "productName": "DevBook",
+    "files": [
+      "main.js",
+      "preload.js",
+      "index.html",
+      "package.json"
+    ],
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "category": "public.app-category.productivity"
+    },
+    "dmg": {
+      "title": "DevBook ${version}"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "CHANGE_ME",
+      "repo": "devbook"
+    }
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  }
+}
