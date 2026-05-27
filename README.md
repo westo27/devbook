@@ -1,5 +1,11 @@
 # DevBook
 
+<br/>
+
+<img width="414" height="368" alt="Screenshot 2026-05-27 at 15 56 14" src="https://github.com/user-attachments/assets/077fe673-2973-46cc-8cdc-78c68015ef2b" />
+
+<br/r>
+
 An always-on-top macOS widget for capturing daily work notes and rolling them up
 into sprint or monthly summaries — with an optional AI write-up and a
 cross-reference against your own git commits.
