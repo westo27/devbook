@@ -1,10 +1,13 @@
 'use strict';
 
-const { app, BrowserWindow, ipcMain, shell, clipboard } = require('electron');
-const { spawn, execFileSync } = require('child_process');
+const { app, BrowserWindow, globalShortcut, ipcMain, Menu, nativeImage, screen, shell, clipboard, Tray } = require('electron');
+const { spawn, execFile, execFileSync } = require('child_process');
+const { promisify } = require('util');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+
+const execFileP = promisify(execFile);
 
 const rootDir = path.join(os.homedir(), 'Documents', 'work-notes');
 const dailyDir = path.join(rootDir, 'daily');
@@ -27,6 +30,14 @@ function writeSettings(s) {
     fs.writeFileSync(settingsPath(), JSON.stringify(s, null, 2));
 }
 
+function debounce(fn, ms) {
+    let t;
+    return (...a) => {
+        clearTimeout(t);
+        t = setTimeout(() => fn(...a), ms);
+    };
+}
+
 const pad = n => String(n).padStart(2, '0');
 const todayStr = () => {
     const d = new Date();
@@ -35,6 +46,18 @@ const todayStr = () => {
 // The day to operate on: a valid YYYY-MM-DD, otherwise today.
 const dayOrToday = day => (typeof day === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(day)) ? day : todayStr();
 const fileForDay = day => path.join(dailyDir, `${dayOrToday(day)}.md`);
+
+// Calendar arithmetic in UTC so day counts are exact integers across DST
+// transitions (a local-time subtraction is an hour short/long twice a year).
+const dayNum = s => {
+    const [y, m, d] = s.split('-').map(Number);
+    return Date.UTC(y, m - 1, d) / 86400000;
+};
+function addDays(s, n) {
+    const [y, m, d] = s.split('-').map(Number);
+    const dt = new Date(Date.UTC(y, m - 1, d + n));
+    return `${dt.getUTCFullYear()}-${pad(dt.getUTCMonth() + 1)}-${pad(dt.getUTCDate())}`;
+}
 
 // Return a day's notes as a list of bullet texts (without the leading "- ").
 function readBullets(day) {
@@ -47,8 +70,22 @@ function readBullets(day) {
     return content.split('\n').filter(l => l.startsWith('- ')).map(l => l.slice(2));
 }
 
-// Remove the bullet at the given index among a day's notes, preserving everything else.
-function deleteNote(index, day) {
+// Find the line of the bullet to act on. Trust the index only if its text still
+// matches what the renderer displayed — the file may have changed underneath us
+// (e.g. the `note` CLI appended a line). Fall back to locating the text, and
+// give up (-1) if it is missing or ambiguous.
+function resolveBullet(lines, index, expected) {
+    const bulletPos = [];
+    lines.forEach((l, i) => { if (l.startsWith('- ')) bulletPos.push(i); });
+    if (index >= 0 && index < bulletPos.length && lines[bulletPos[index]].slice(2) === expected) {
+        return bulletPos[index];
+    }
+    const matches = bulletPos.filter(p => lines[p].slice(2) === expected);
+    return matches.length === 1 ? matches[0] : -1;
+}
+
+// Remove the given bullet among a day's notes, preserving everything else.
+function deleteNote(index, expected, day) {
     const file = fileForDay(day);
     let content;
     try {
@@ -56,21 +93,19 @@ function deleteNote(index, day) {
     } catch {
         return readBullets(day);
     }
-    let seen = -1;
-    const kept = content.split('\n').filter(l => {
-        if (l.startsWith('- ')) {
-            seen += 1;
-            return seen !== index;
-        }
-        return true;
-    });
-    fs.writeFileSync(file, kept.join('\n'));
+    const lines = content.split('\n');
+    const pos = resolveBullet(lines, index, String(expected ?? ''));
+    if (pos === -1) {
+        return readBullets(day);
+    }
+    lines.splice(pos, 1);
+    fs.writeFileSync(file, lines.join('\n'));
     return readBullets(day);
 }
 
-// Replace the bullet at the given index among a day's notes with new text,
-// preserving everything else. The text may include the leading "HH:MM — " stamp.
-function editNote(index, text, day) {
+// Replace the given bullet among a day's notes with new text, preserving
+// everything else. The text may include the leading "HH:MM — " stamp.
+function editNote(index, expected, text, day) {
     text = String(text || '').replace(/[\r\n]+/g, ' ').trim();
     if (text === '') {
         return readBullets(day);
@@ -82,15 +117,48 @@ function editNote(index, text, day) {
     } catch {
         return readBullets(day);
     }
-    let seen = -1;
-    const lines = content.split('\n').map(l => {
-        if (l.startsWith('- ')) {
-            seen += 1;
-            if (seen === index) return `- ${text}`;
-        }
-        return l;
-    });
+    const lines = content.split('\n');
+    const pos = resolveBullet(lines, index, String(expected ?? ''));
+    if (pos === -1) {
+        return readBullets(day);
+    }
+    lines[pos] = `- ${text}`;
     fs.writeFileSync(file, lines.join('\n'));
+    return readBullets(day);
+}
+
+// Re-insert a bullet so it becomes bullet #index again (used by undo). If the
+// position no longer exists, append at the end instead.
+function insertNote(index, text, day) {
+    text = String(text || '').replace(/[\r\n]+/g, ' ').trim();
+    if (text === '') {
+        return readBullets(day);
+    }
+    fs.mkdirSync(dailyDir, { recursive: true });
+    const file = fileForDay(day);
+    let content;
+    try {
+        content = fs.readFileSync(file, 'utf8');
+    } catch {
+        content = `# ${dayOrToday(day)}\n\n`;
+    }
+    const lines = content.split('\n');
+    let seen = -1;
+    let pos = -1;
+    for (let i = 0; i < lines.length; i++) {
+        if (lines[i].startsWith('- ')) {
+            seen += 1;
+            if (seen === index) { pos = i; break; }
+        }
+    }
+    if (pos === -1) {
+        if (!content.endsWith('\n')) content += '\n';
+        content += `- ${text}\n`;
+        fs.writeFileSync(file, content);
+    } else {
+        lines.splice(pos, 0, `- ${text}`);
+        fs.writeFileSync(file, lines.join('\n'));
+    }
     return readBullets(day);
 }
 
@@ -118,20 +186,17 @@ function appendNote(text, time, day) {
 
 ipcMain.handle('note:append', (_e, text, time, day) => appendNote(text, time, day));
 ipcMain.handle('note:read', (_e, day) => readBullets(day));
-ipcMain.handle('note:delete', (_e, index, day) => deleteNote(index, day));
-ipcMain.handle('note:edit', (_e, index, text, day) => editNote(index, text, day));
+ipcMain.handle('note:delete', (_e, index, expected, day) => deleteNote(index, expected, day));
+ipcMain.handle('note:edit', (_e, index, expected, text, day) => editNote(index, expected, text, day));
+ipcMain.handle('note:insert', (_e, index, text, day) => insertNote(index, text, day));
 ipcMain.handle('clipboard:write', (_e, text) => { clipboard.writeText(String(text || '')); return true; });
-ipcMain.on('win:close', e => BrowserWindow.fromWebContents(e.sender)?.close());
 
 // --- Sprint summary ---------------------------------------------------------
 
-const fmt = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-const parseDate = s => new Date(`${s}T00:00:00`);
-
-// Anchor + cadence: defaults to a two-week sprint starting Wed 2026-05-27.
-// Source order: app settings (Settings panel) > legacy sprint-config.json > defaults.
+// Anchor + cadence. Source order: app settings (Settings panel) > legacy
+// sprint-config.json > self-initialised default (today, persisted on first run
+// so the derived windows stay stable across days).
 function sprintConfig() {
-    const def = { anchor: '2026-05-27', lengthDays: 14 };
     const s = rawSettings();
     let anchor = s.anchor;
     let lengthDays = s.lengthDays;
@@ -142,44 +207,47 @@ function sprintConfig() {
             lengthDays = lengthDays || c.lengthDays;
         } catch { /* no legacy config */ }
     }
-    return { anchor: anchor || def.anchor, lengthDays: lengthDays || def.lengthDays };
+    lengthDays = Number(lengthDays) > 0 ? Number(lengthDays) : 14;
+    if (!anchor || !/^\d{4}-\d{2}-\d{2}$/.test(anchor)) {
+        anchor = todayStr();
+        const out = rawSettings();
+        out.anchor = anchor;
+        if (!out.lengthDays) out.lengthDays = lengthDays;
+        writeSettings(out);
+    }
+    return { anchor, lengthDays };
 }
 
 // The sprint window containing the reference date (default today), derived from
 // the anchor cadence.
 function sprintWindow(refStr) {
     const { anchor, lengthDays } = sprintConfig();
-    const a = parseDate(anchor);
-    let ref;
-    if (refStr && /^\d{4}-\d{2}-\d{2}$/.test(refStr)) {
-        ref = parseDate(refStr);
-    } else {
-        const now = new Date();
-        ref = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    }
-    const idx = Math.floor((ref - a) / 86400000 / lengthDays);
-    const start = new Date(a);
-    start.setDate(a.getDate() + idx * lengthDays);
-    const end = new Date(start);
-    end.setDate(start.getDate() + lengthDays - 1);
-    return { start: fmt(start), end: fmt(end) };
+    const ref = (typeof refStr === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(refStr)) ? refStr : todayStr();
+    const idx = Math.floor((dayNum(ref) - dayNum(anchor)) / lengthDays);
+    const start = addDays(anchor, idx * lengthDays);
+    return { start, end: addDays(start, lengthDays - 1) };
 }
 
 // --- Git cross-reference ----------------------------------------------------
 
+let cachedDefaultEmail = null;
 function defaultGitEmail() {
-    try {
-        return execFileSync('git', ['config', '--global', 'user.email'], { encoding: 'utf8' }).trim();
-    } catch {
-        return '';
+    if (cachedDefaultEmail === null) {
+        try {
+            cachedDefaultEmail = execFileSync('git', ['config', '--global', 'user.email'], { encoding: 'utf8' }).trim();
+        } catch {
+            cachedDefaultEmail = '';
+        }
     }
+    return cachedDefaultEmail;
 }
 
 // Parent directory scanned one level deep for repos, plus the author emails that
-// identify the user's commits. Editable in settings; sensible defaults otherwise.
+// identify the user's commits. Both are configured in settings; authors default
+// to the global git email.
 function gitConfig() {
     const s = rawSettings();
-    const parent = s.gitParent || path.join(os.homedir(), 'code', 'docker');
+    const parent = (typeof s.gitParent === 'string' && s.gitParent.trim()) ? s.gitParent.trim() : '';
     let authors = Array.isArray(s.gitAuthors) ? s.gitAuthors.filter(Boolean) : [];
     if (!authors.length) {
         const def = defaultGitEmail();
@@ -190,6 +258,7 @@ function gitConfig() {
 
 // Immediate subdirectories of parent that are git repositories.
 function discoverRepos(parent) {
+    if (!parent) return [];
     let entries;
     try {
         entries = fs.readdirSync(parent, { withFileTypes: true });
@@ -203,8 +272,9 @@ function discoverRepos(parent) {
 
 // Commits authored by the configured emails across all discovered repos in
 // [start, end]. Each commit line is "date\thash\tsubject". git log already
-// de-duplicates a commit seen on multiple refs under --all.
-function collectCommits(start, end) {
+// de-duplicates a commit seen on multiple refs under --all. Repos are scanned
+// concurrently and asynchronously so the main process never blocks.
+async function collectCommits(start, end) {
     const { parent, authors } = gitConfig();
     const repos = discoverRepos(parent);
     const authorArgs = authors.flatMap(a => ['--author', a]);
@@ -214,21 +284,25 @@ function collectCommits(start, end) {
     if (!authors.length) {
         return { repos: out, total, scanned: repos.length, parent, errors: ['No author emails configured.'] };
     }
-    for (const repo of repos) {
+    const results = await Promise.all(repos.map(async repo => {
         try {
-            const log = execFileSync('git', [
+            const { stdout } = await execFileP('git', [
                 '-C', repo.path, 'log', '--all', '--no-merges',
                 '--since', `${start} 00:00:00`, '--until', `${end} 23:59:59`,
                 ...authorArgs,
                 '--date=short', '--pretty=format:%ad\t%h\t%s',
             ], { encoding: 'utf8', timeout: 15000 });
-            const lines = log.split('\n').map(l => l.trim()).filter(Boolean);
-            if (lines.length) {
-                out.push({ repo: repo.name, commits: lines });
-                total += lines.length;
-            }
+            return { repo: repo.name, lines: stdout.split('\n').map(l => l.trim()).filter(Boolean) };
         } catch (e) {
-            errors.push(`${repo.name}: ${String(e.message).split('\n')[0]}`);
+            return { repo: repo.name, error: String(e.message).split('\n')[0] };
+        }
+    }));
+    for (const r of results) {
+        if (r.error) {
+            errors.push(`${r.repo}: ${r.error}`);
+        } else if (r.lines.length) {
+            out.push({ repo: r.repo, commits: r.lines });
+            total += r.lines.length;
         }
     }
     return { repos: out, total, scanned: repos.length, parent, errors };
@@ -253,10 +327,7 @@ function collectNotes(start, end) {
     let markdown = '';
     let days = 0;
     let notes = 0;
-    const cursor = parseDate(start);
-    const last = parseDate(end);
-    while (cursor <= last) {
-        const day = fmt(cursor);
+    for (let day = start; day <= end; day = addDays(day, 1)) {
         let bullets = [];
         try {
             bullets = fs.readFileSync(path.join(dailyDir, `${day}.md`), 'utf8')
@@ -267,7 +338,6 @@ function collectNotes(start, end) {
             notes += bullets.length;
             markdown += `## ${day}\n${bullets.join('\n')}\n\n`;
         }
-        cursor.setDate(cursor.getDate() + 1);
     }
     return { markdown, days, notes };
 }
@@ -338,7 +408,7 @@ async function aiSummary(start, end, markdown, kind, commitsMd) {
 // Returns the written content so the renderer can offer copy-to-clipboard.
 async function generateSummary({ start, end, ai, git, kind }) {
     const { markdown, days, notes } = collectNotes(start, end);
-    const commitData = git ? collectCommits(start, end) : { total: 0, repos: [] };
+    const commitData = git ? await collectCommits(start, end) : { total: 0, repos: [] };
     const commitsMd = commitsMarkdown(commitData);
     fs.mkdirSync(summaryDir, { recursive: true });
     const title = kind === 'month' ? 'Monthly summary' : 'Sprint summary';
@@ -378,20 +448,17 @@ function generateSprint({ date, ai, git }) {
 
 // Last 30 calendar days, inclusive of today.
 function generateMonth({ ai, git }) {
-    const now = new Date();
-    const end = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const start = new Date(end);
-    start.setDate(end.getDate() - 29);
-    return generateSummary({ start: fmt(start), end: fmt(end), ai, git, kind: 'month' });
+    const end = todayStr();
+    return generateSummary({ start: addDays(end, -29), end, ai, git, kind: 'month' });
 }
 
 ipcMain.handle('sprint:window', (_e, date) => sprintWindow(date));
 ipcMain.handle('sprint:generate', (_e, opts) => generateSprint(opts));
 ipcMain.handle('month:generate', (_e, opts) => generateMonth(opts));
 // Preview commits for the sprint window containing the given date (Git tab).
-ipcMain.handle('git:commits', (_e, date) => {
+ipcMain.handle('git:commits', async (_e, date) => {
     const { start, end } = sprintWindow(date);
-    return { start, end, ...collectCommits(start, end) };
+    return { start, end, ...await collectCommits(start, end) };
 });
 
 function allSettings() {
@@ -420,30 +487,98 @@ ipcMain.handle('settings:save', (_e, opts = {}) => {
     return allSettings();
 });
 
+// --- Window, tray, shortcut ---------------------------------------------------
+
+// Saved bounds are reused only if they still intersect a connected display, so
+// the window cannot come back stranded on an unplugged monitor.
+function savedWindowBounds() {
+    const b = rawSettings().windowBounds;
+    if (!b || !Number.isFinite(b.width) || !Number.isFinite(b.height)) return {};
+    if (Number.isFinite(b.x) && Number.isFinite(b.y)) {
+        const onScreen = screen.getAllDisplays().some(({ workArea: a }) =>
+            b.x < a.x + a.width && b.x + b.width > a.x && b.y < a.y + a.height && b.y + b.height > a.y);
+        if (onScreen) return b;
+    }
+    return { width: b.width, height: b.height };
+}
+
 function createWindow() {
+    const bounds = savedWindowBounds();
     const win = new BrowserWindow({
-        width: 360,
-        height: 480,
-        frame: false,
-        alwaysOnTop: true,
-        resizable: true,
-        skipTaskbar: false,
+        width: bounds.width || 360,
+        height: bounds.height || 480,
+        x: bounds.x,
+        y: bounds.y,
+        titleBarStyle: 'hiddenInset',
         webPreferences: {
             preload: path.join(__dirname, 'preload.js'),
             contextIsolation: true,
             nodeIntegration: false,
+            sandbox: true,
         },
     });
-    win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+    const saveBounds = debounce(() => {
+        if (win.isDestroyed()) return;
+        const s = rawSettings();
+        s.windowBounds = win.getBounds();
+        writeSettings(s);
+    }, 500);
+    win.on('move', saveBounds);
+    win.on('resize', saveBounds);
     win.loadFile('index.html');
+    return win;
+}
+
+const frontWindow = () => BrowserWindow.getAllWindows()[0] || null;
+
+function showApp() {
+    const win = frontWindow() || createWindow();
+    win.show();
+    win.focus();
+}
+
+function toggleApp() {
+    const win = frontWindow();
+    if (win && win.isFocused()) win.hide();
+    else showApp();
+}
+
+let tray; // module-level so it is not garbage-collected
+function setupTray() {
+    tray = new Tray(nativeImage.createEmpty());
+    tray.setTitle('✎');
+    tray.setToolTip('DevBook');
+    tray.setContextMenu(Menu.buildFromTemplate([
+        { label: 'Open DevBook', click: showApp },
+        { type: 'separator' },
+        { label: 'Quit DevBook', click: () => app.quit() },
+    ]));
+}
+
+// Push file changes to the renderer so the notes list stays live when the
+// `note` CLI (or anything else) writes to the daily files.
+function watchDaily() {
+    fs.mkdirSync(dailyDir, { recursive: true });
+    try {
+        fs.watch(dailyDir, (_event, filename) => {
+            for (const w of BrowserWindow.getAllWindows()) {
+                w.webContents.send('notes:changed', filename || '');
+            }
+        });
+    } catch { /* live refresh is best-effort */ }
 }
 
 app.whenReady().then(() => {
     createWindow();
+    setupTray();
+    watchDaily();
+    globalShortcut.register('CommandOrControl+Alt+N', toggleApp);
     app.on('activate', () => {
-        if (BrowserWindow.getAllWindows().length === 0) createWindow();
+        if (!frontWindow()) createWindow();
     });
 });
+
+app.on('will-quit', () => globalShortcut.unregisterAll());
 
 app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') app.quit();
