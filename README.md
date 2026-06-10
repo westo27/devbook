@@ -7,8 +7,8 @@
 <br/>
 <br/>
 
-An always-on-top macOS widget for capturing daily work notes and rolling them up
-into sprint or monthly summaries — with an optional AI write-up and a
+A small macOS app for capturing daily work notes and rolling them up into
+sprint or monthly summaries — with an optional AI write-up and a
 cross-reference against your own git commits.
 
 Built for standups, sprint retros, and monthly 1:1s: jot what you do as you do
@@ -26,8 +26,13 @@ Download the latest `DevBook-<version>.dmg` from the
 
 ## Use
 
-Launch DevBook; a small frameless window floats above other apps. Drag it by the
-title bar onto a second screen and leave it there.
+Launch DevBook; a small window opens. Its position and size are remembered
+across restarts, so you can park it on a second screen and it will reopen there.
+
+- **⌘⌥N** (global shortcut) summons or hides the window from anywhere.
+- A **✎ menu-bar item** reopens the window or quits the app.
+- Closing the window leaves the app running in the Dock and menu bar; click the
+  Dock icon, the menu-bar item, or press ⌘⌥N to bring it back.
 
 ### Notes tab
 - Type a note and press **Enter** to save (**Shift+Enter** for a new line).
@@ -35,7 +40,10 @@ title bar onto a second screen and leave it there.
   different time.
 - The **Day** field selects which day you are viewing or editing — change it to
   read or backfill past days.
-- Hover a note to **edit (✎)** or **delete (✕)** it.
+- Hover a note to **edit (✎)** or **delete (✕)** it. A deleted note can be
+  restored with the **Undo** link shown for a few seconds afterwards.
+- Notes appended from outside the app (e.g. the `note` shell helper) appear in
+  the list automatically.
 
 Notes are stored as plain Markdown, one file per day, in
 `~/Documents/work-notes/daily/YYYY-MM-DD.md`.
